@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Escáner de DNI a PDF</title>
+<style>
+:root{--bg:#f5f5f2;--fg:#1a1a1a;--card:#fff;--mut:#6b6b66;--acc:#1d4ed8;--ok:#16a34a;--bd:#ddd;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141414;--fg:#eee;--card:#202020;--mut:#9a9a94;--acc:#6b9bff;--bd:#333}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:560px;margin:0 auto;padding:16px}
+h1{font-size:1.3rem;margin:0 0 4px}
+p.s{color:var(--mut);margin:0 0 14px;font-size:.9rem}
+.cam{position:relative;background:#000;border-radius:14px;overflow:hidden;width:100%}
+video{display:block;width:100%;height:100%;object-fit:cover}
+.frame{position:absolute;left:7%;width:86%;aspect-ratio:1.586;top:50%;transform:translateY(-50%);border:3px solid #fff;border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.55);transition:border-color .2s}
+.frame.ok{border-color:#4ade80}
+.hint{position:absolute;left:0;right:0;bottom:8px;text-align:center;color:#fff;font-size:.85rem;text-shadow:0 1px 3px #000}
+.bar{height:5px;background:rgba(255,255,255,.3);position:absolute;left:0;bottom:0;width:100%}
+.bar i{display:block;height:100%;width:0;background:#4ade80}
+.row{display:flex;gap:10px;margin:12px 0;flex-wrap:wrap}
+button{flex:1;min-width:120px;padding:13px 14px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg);font:inherit;font-weight:600}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.45}
+.steps{display:flex;gap:8px;margin-bottom:12px}
+.st{flex:1;padding:8px;border-radius:10px;background:var(--card);border:1px solid var(--bd);text-align:center;font-size:.85rem;color:var(--mut)}
+.st.on{border-color:var(--acc);color:var(--fg);font-weight:700}
+.st.done{border-color:var(--ok);color:var(--ok)}
+.th{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.th img{width:100%;border-radius:8px;border:1px solid var(--bd);display:block}
+.th span{font-size:.8rem;color:var(--mut)}
+#msg{color:#dc2626;font-size:.9rem;min-height:1.2em}
+</style>
+</head>
+<body>
+<main>
+<h1>Escáner de DNI → PDF A4</h1>
+<p class="s">Todo se procesa en tu dispositivo. Nada se sube a ningún servidor.</p>
+<div class="steps"><div class="st on" id="s1">1 · Anverso</div><div class="st" id="s2">2 · Reverso</div><div class="st" id="s3">3 · PDF</div></div>
+
+<div id="camBox" class="cam" style="aspect-ratio:4/3">
+<video id="v" playsinline muted autoplay></video>
+<div class="frame" id="fr"></div>
+<div class="hint" id="hint">Pulsa «Activar cámara»</div>
+<div class="bar"><i id="pg"></i></div>
+</div>
+<div id="msg"></div>
+<div class="row">
+<button class="p" id="bStart">Activar cámara</button>
+<button id="bShot" disabled>Capturar ahora</button>
+</div>
+
+<div class="th" id="th" hidden>
+<div><img id="i1"><span>Anverso</span></div>
+<div><img id="i2"><span>Reverso</span></div>
+</div>
+<div class="row" id="end" hidden>
+<button id="bRe1">Repetir anverso</button>
+<button id="bRe2">Repetir reverso</button>
+<button class="p" id="bPdf">Descargar PDF A4</button>
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+(function(){
+var RATIO=1.586, FW=0.86;
+var v=document.getElementById('v'), fr=document.getElementById('fr'), hint=document.getElementById('hint'),
+    pg=document.getElementById('pg'), msg=document.getElementById('msg'), box=document.getElementById('camBox');
+var bStart=document.getElementById('bStart'), bShot=document.getElementById('bShot');
+var imgs=[null,null], step=0, stream=null, prev=null, stable=0, timer=null, cooldown=0;
+var small=document.createElement('canvas'); small.width=160; small.height=Math.round(160/RATIO);
+var sctx=small.getContext('2d',{willReadFrequently:true});
+
+function setSteps(){
+  ['s1','s2','s3'].forEach(function(id,i){
+    var e=document.getElementById(id);
+    e.className='st'+(i===step?' on':'')+(i<step||(i===2&&imgs[0]&&imgs[1])?' done':'');
+  });
+  var label=step===0?'anverso':'reverso';
+  hint.textContent=step<2?'Coloca el '+label+' del DNI dentro del marco':'Revisa y descarga';
+}
+
+function frameRect(){
+  var w=v.videoWidth*FW, h=w/RATIO;
+  if(h>v.videoHeight*0.9){h=v.videoHeight*0.9;w=h*RATIO;}
+  return {x:(v.videoWidth-w)/2,y:(v.videoHeight-h)/2,w:w,h:h};
+}
+
+bStart.onclick=async function(){
+  msg.textContent='';
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+    v.srcObject=stream; await v.play();
+    v.onloadedmetadata=null;
+    box.style.aspectRatio=v.videoWidth+'/'+v.videoHeight;
+    var r=frameRect();
+    fr.style.width=(r.w/v.videoWidth*100)+'%'; fr.style.left=(r.x/v.videoWidth*100)+'%';
+    bShot.disabled=false; bStart.disabled=true; step=0; setSteps();
+    timer=setInterval(analyze,250);
+  }catch(e){
+    msg.textContent='No se pudo acceder a la cámara ('+e.name+'). Concede el permiso o abre esta página directamente en el navegador (HTTPS).';
+  }
+};
+
+function analyze(){
+  if(!stream||step>1||!v.videoWidth)return;
+  if(cooldown>0){cooldown--;return;}
+  var r=frameRect();
+  sctx.drawImage(v,r.x,r.y,r.w,r.h,0,0,small.width,small.height);
+  var d=sctx.getImageData(0,0,small.width,small.height).data, n=small.width*small.height, g=new Uint8Array(n);
+  for(var i=0;i<n;i++)g[i]=(d[i*4]*0.3+d[i*4+1]*0.59+d[i*4+2]*0.11);
+  var tex=0, W=small.width;
+  for(var y=1;y<small.height;y++)for(var x=1;x<W;x++){
+    var k=y*W+x; tex+=Math.abs(g[k]-g[k-1])+Math.abs(g[k]-g[k-W]);
+  }
+  tex/=n*2;
+  var diff=0;
+  if(prev){for(var j=0;j<n;j++)diff+=Math.abs(g[j]-prev[j]);diff/=n;}else diff=99;
+  prev=g;
+  // Tarjeta presente: textura suficiente (texto/foto/chip) y sin movimiento
+  var present=tex>5 && tex<40, still=diff<3.5;
+  if(present&&still){stable++;}else{stable=0;}
+  var p=Math.min(stable/5,1);
+  pg.style.width=(p*100)+'%';
+  fr.classList.toggle('ok',present&&still);
+  hint.textContent=!present?'Busca el DNI en el marco…':(!still?'Mantén quieto el DNI…':'¡Detectado! Capturando…');
+  if(stable>=5){stable=0;capture();}
+}
+
+function capture(){
+  if(!stream||step>1)return;
+  var r=frameRect(), c=document.createElement('canvas');
+  var outW=Math.min(1600,Math.round(r.w)); c.width=outW; c.height=Math.round(outW/RATIO);
+  var ctx=c.getContext('2d');
+  ctx.filter='contrast(1.12) brightness(1.04)';
+  ctx.drawImage(v,r.x,r.y,r.w,r.h,0,0,c.width,c.height);
+  imgs[step]=c.toDataURL('image/jpeg',0.92);
+  document.getElementById('i'+(step+1)).src=imgs[step];
+  document.getElementById('th').hidden=false;
+  pg.style.width='0';fr.classList.remove('ok');prev=null;cooldown=8;
+  if(step===0){step=1;setSteps();hint.textContent='Ahora gira el DNI: reverso';}
+  else{step=2;setSteps();finish();}
+}
+
+function finish(){
+  document.getElementById('end').hidden=false;
+  if(stream){stream.getTracks().forEach(function(t){t.stop();});stream=null;}
+  clearInterval(timer);bShot.disabled=true;bStart.disabled=false;bStart.textContent='Reactivar cámara';
+  hint.textContent='Escaneo completo';
+}
+
+bShot.onclick=capture;
+
+function retake(i){
+  imgs[i]=null;document.getElementById('i'+(i+1)).removeAttribute('src');
+  step=i;document.getElementById('end').hidden=true;
+  bStart.disabled=false;bStart.click();
+}
+document.getElementById('bRe1').onclick=function(){retake(0);};
+document.getElementById('bRe2').onclick=function(){retake(1);};
+
+document.getElementById('bPdf').onclick=function(){
+  if(!imgs[0]||!imgs[1]){msg.textContent='Faltan caras por escanear.';return;}
+  var jsPDF=window.jspdf.jsPDF, doc=new jsPDF({unit:'mm',format:'a4',orientation:'portrait'});
+  var w=85.6,h=54,x=(210-w)/2;
+  doc.addImage(imgs[0],'JPEG',x,50,w,h);
+  doc.addImage(imgs[1],'JPEG',x,50+h+25,w,h);
+  doc.setDrawColor(150);doc.setLineWidth(0.2);
+  doc.rect(x,50,w,h);doc.rect(x,50+h+25,w,h);
+  doc.setFontSize(9);doc.setTextColor(120);
+  doc.text('Anverso',x,47);doc.text('Reverso',x,50+h+22);
+  doc.save('DNI.pdf');
+};
+
+window.addEventListener('pagehide',function(){if(stream)stream.getTracks().forEach(function(t){t.stop();});});
+})();
+</script>
+</body>
+</html>
